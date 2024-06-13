@@ -1,7 +1,7 @@
 package rijndael
 
 import (
-	"errors"
+	"fmt"
 	"math"
 
 	"github.com/kiamev/ffpr-save-cypher/padder"
@@ -67,18 +67,15 @@ func New() Rijndael {
 
 func (r rijndael) Encrypt(source []byte) (result []byte, err error) {
 	var (
-		ppt    = r.padder.Encode(source)
-		offset = 0
-		v      = make([]byte, len(r.iv))
+		ppt    = padder.New().Encode(source)
+		offset int
 	)
-	copy(v, r.iv)
+	v := r.iv
 	for offset < len(ppt) {
 		block := ppt[offset : offset+int(r.blockSize)]
 		block = r.xOrBlock(block, v)
-		block, err = r.encrypt(block)
-		if err != nil {
-			result = nil
-			break
+		if block, err = r.encrypt(block); err != nil {
+			return
 		}
 		result = append(result, block...)
 		offset += int(r.blockSize)
@@ -115,58 +112,53 @@ func (r rijndael) xOrBlock(b1, b2 []byte) (result []byte) {
 }
 
 func (r rijndael) encrypt(source []byte) (result []byte, err error) {
-	if len(source)%int(r.blockSize) != 0 {
-		err = errors.New("wrong block length")
+	if len(source) != int(r.blockSize) {
+		err = fmt.Errorf("wrong block length, expected %d got %d", r.blockSize, len(source))
 		return
 	}
-	var (
-		rounds = len(r.ke) - 1
-		sc     = 2
-	)
-	if r.blockSize == 4 {
-		sc = 0
-	} else if r.blockSize == 6 {
-		sc = 1
+	kE := r.ke
+	bC := int(r.blockSize / 4)
+	rounds := len(kE) - 1
+	var sC int
+	if bC == 4 {
+		sC = 0
+	} else if bC == 6 {
+		sC = 1
+	} else {
+		sC = 2
 	}
-	bc := int(math.Floor(float64(r.blockSize) / 4.0))
-	s1 := shifts[sc][1][0]
-	s2 := shifts[sc][2][0]
-	s3 := shifts[sc][3][0]
-	a := make([]uint32, bc)
-	var t []uint32
-	for i := 0; i < bc; i++ {
-		t = append(t,
-			uint32(source[i*4])<<24|
-				uint32(source[i*4+1])<<16|
-				uint32(source[i*4+2])<<8|
-				uint32(source[i*4+3])^r.ke[0][i])
+	s1 := int(shifts[sC][1][0])
+	s2 := int(shifts[sC][2][0])
+	s3 := int(shifts[sC][3][0])
+	a := make([]uint32, bC)
+	// temporary work array
+	t := make([]uint32, bC)
+	// source to ints + key
+	for i := range t {
+		t[i] = (uint32(source[i*4])<<24 | uint32(source[i*4+1])<<16 | uint32(source[i*4+2])<<8 | uint32(source[i*4+3])) ^ kE[0][i]
 	}
-	for j := 1; j <= rounds; j++ {
-		for i := 0; i < bc; i++ {
-			a[i] =
-				T1[(t[i]>>24)&0xFF] ^
-					T2[(t[(i+int(s1))%bc]>>16)&0xFF] ^
-					T3[(t[(i+int(s2))%bc]>>8)&0xFF] ^
-					T4[t[(i+int(s3))%bc]&0xFF] ^ r.ke[j][i]
+	// apply round transforms
+	for i := 1; i < rounds; i++ {
+		for j := range a {
+			a[j] = (T1[(t[j]>>24)&0xFF] ^
+				T2[(t[(j+s1)%bC]>>16)&0xFF] ^
+				T3[(t[(j+s2)%bC]>>8)&0xFF] ^
+				T4[t[(j+s3)%bC]&0xFF]) ^ kE[i][j]
 		}
 		copy(t, a)
 	}
-	for i := 0; i < bc; i++ {
-		tt := r.ke[rounds][i]
-
-		j := uint32(S[int(byte(t[i]>>24)&0xFF)]) ^ (tt >> 24)
-		result = append(result, byte(j)&0xFF)
-
-		j = uint32(S[int(byte(t[(i+int(s1))%bc]>>16)&0xFF)]) ^ (tt >> 16)
-		result = append(result, byte(j)&0xFF)
-
-		j = uint32(S[int(byte(t[(i+int(s2))%bc]>>8)&0xFF)]) ^ (tt >> 8)
-		result = append(result, byte(j)&0xFF)
-
-		j = uint32(S[int(byte(t[(i+int(s3))%bc]&0xFF))]) ^ tt
-		result = append(result, byte(j)&0xFF)
+	// last round is special
+	result = make([]byte, 0, r.blockSize)
+	for i := range a {
+		tt := kE[rounds][i]
+		result = append(result,
+			S[(t[i]>>24)&0xFF]^byte(tt>>24),
+			S[(t[(i+s1)%bC]>>16)&0xFF]^byte(tt>>16),
+			S[(t[(i+s2)%bC]>>8)&0xFF]^byte(tt>>8),
+			S[t[(i+s3)%bC]&0xFF]^byte(tt),
+		)
 	}
-	return result, nil
+	return
 }
 
 func (r rijndael) decrypt(cipher []byte) (result []byte, err error) {
